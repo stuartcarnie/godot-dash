@@ -16,7 +16,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
 	"github.com/spf13/cobra"
-	"github.com/stuartcarnie/godot-dash/pkg/parallel"
+	"github.com/stuartcarnie/godotdash/pkg/parallel"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 	"gorm.io/driver/sqlite"
@@ -31,6 +31,8 @@ var (
 		RunE:  process,
 	}
 	// arguments
+	noDB       bool
+	noClasses  bool
 	docsPath   string
 	docsetPath string
 	pathFilter regexFlag
@@ -59,9 +61,11 @@ func (r *regexFlag) Type() string {
 }
 
 func init() {
-	cmd.Flags().StringVar(&docsPath, "docs-path", "", "The path to the godot-docs")
+	cmd.Flags().StringVar(&docsPath, "docs-path", "", "The path to the godot-docs source")
 	cmd.Flags().StringVar(&docsetPath, "docset-path", "", "The base path to the Godot.docset")
-	cmd.Flags().Var(&pathFilter, "path-filter", "A regex pattern to filter the paths to process")
+	cmd.Flags().BoolVar(&noDB, "no-db", false, "Do not create the database (TESTING)")
+	cmd.Flags().BoolVar(&noClasses, "no-classes", false, "Do not process classes (TESTING)")
+	cmd.Flags().Var(&pathFilter, "path-filter", "A regex pattern to filter the paths to process (TESTING)")
 	_ = cobra.MarkFlagRequired(cmd.Flags(), "docs-path")
 	_ = cobra.MarkFlagRequired(cmd.Flags(), "docset-path")
 }
@@ -132,18 +136,20 @@ func process(cmd *cobra.Command, args []string) error {
 	dbFilename := filepath.Join(docsetPath, "Contents/Resources/docSet.dsidx")
 	dsn := fmt.Sprintf("%s?_busy_timeout=", dbFilename)
 	var err error
-	db, err = gorm.Open(sqlite.Open(dsn), &gorm.Config{
-		CreateBatchSize: batchSize,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
+	if noDB == false {
+		db, err = gorm.Open(sqlite.Open(dsn), &gorm.Config{
+			CreateBatchSize: batchSize,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to open database: %w", err)
+		}
+
+		db.Exec("PRAGMA synchronous = OFF; PRAGMA JOURNAL_MODE = memory")
+
+		migrator := db.Migrator()
+		_ = migrator.DropTable(&SearchIndex{})
+		_ = migrator.AutoMigrate(&SearchIndex{})
 	}
-
-	db.Exec("PRAGMA synchronous = OFF; PRAGMA JOURNAL_MODE = memory")
-
-	migrator := db.Migrator()
-	_ = migrator.DropTable(&SearchIndex{})
-	_ = migrator.AutoMigrate(&SearchIndex{})
 
 	// start with index.html
 	path := filepath.Join(docsPath, "index.html")
@@ -151,442 +157,28 @@ func process(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}
-	top, err := html.Parse(f)
+	root, err := html.Parse(f)
 	if err != nil {
 		return fmt.Errorf("failed to parse HTML: %w", err)
 	}
 
 	targetPath = filepath.Join(docsetPath, "Contents/Resources/Documents")
 
-	processClassesIndex()
-
-	// process the top level guides
-	sel := css.MustCompile("li.toctree-l1 > a")
-
-	rows := make([]SearchIndex, batchSize)
-	row := 0
-
-	for _, node := range sel.MatchAll(top) {
-		fmt.Printf("Processing %s\n", node.FirstChild.Data)
-		rows[row].Name = node.FirstChild.Data
-		rows[row].Type = "Guide"
-		res, ok := lo.Find(node.Attr, func(item html.Attribute) bool { return item.Key == "href" })
-		if !ok {
-			continue
-		}
-		rows[row].Path = strings.TrimSpace(res.Val)
-		row++
-	}
-
-	db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "name"}, {Name: "type"}, {Name: "path"}},
-		DoNothing: true,
-	}).Create(rows[:row])
-
-	doc := goquery.NewDocumentFromNode(top)
-
-	type inputData struct {
-		FilePath string
-		HRef     string
-		Sel      *goquery.Selection
-	}
-
-	var (
-		classes []inputData
-		guides  []inputData
-	)
-
-	// find all anchor tags in the tree
-	{
-		mat := css.MustCompile("li.toctree-l2 > a")
-		sel := doc.FindMatcher(mat)
-		sel.Each(func(i int, s *goquery.Selection) {
-			ref, ok := s.Attr("href")
-			if !ok {
-				return
-			}
-
-			fileUrl, err := url.Parse(ref)
-			if err != nil {
-				slog.Error("Failed to parse URL.", "url", ref, "error", err)
-				return
-			}
-			filePath := fileUrl.Path
-
-			if pathFilter.re != nil && !pathFilter.re.MatchString(filePath) {
-				return
-			}
-
-			if strings.HasPrefix(filePath, "classes/") {
-				classes = append(classes, inputData{
-					FilePath: filePath,
-					HRef:     ref,
-					Sel:      s,
-				})
-			} else {
-				guides = append(guides, inputData{
-					FilePath: filePath,
-					HRef:     ref,
-					Sel:      s,
-				})
-			}
-		})
-	}
-
-	var (
-		processClasses = true
-		processGuides  = true
-	)
-
-	// index classes
-	if processClasses {
-		type class struct {
-			Name string
-			Path string
-			Rows []SearchIndex
-		}
-
-		classData := make([]class, len(classes))
-
-		var (
-			selDescription      = css.MustCompile("section.classref-introduction-group#description > h2")
-			selTutorials        = css.MustCompile("section.classref-introduction-group#tutorials > h2")
-			selTutorialItems    = css.MustCompile("a.reference.internal")
-			selProperties       = css.MustCompile("section.classref-reftable-group#properties > h2")
-			selPropertyItems    = css.MustCompile("tr td:nth-child(2) a.reference.internal")
-			selConstructors     = css.MustCompile("section.classref-reftable-group#constructors > h2")
-			selConstructorItems = css.MustCompile("tr td:nth-child(2) a.reference.internal")
-			selMethods          = css.MustCompile("section.classref-reftable-group#methods > h2")
-			selMethodItems      = css.MustCompile("tr td:nth-child(2) a:nth-child(1).reference.internal")
-			selOperators        = css.MustCompile("section.classref-reftable-group#operators > h2")
-			selOperatorItems    = css.MustCompile("tr td:nth-child(2) a.reference.internal")
-			selSignals          = css.MustCompile("section.classref-descriptions-group#signals > h2")
-			selSignalItems      = css.MustCompile("p.classref-signal")
-			selEnumerations     = css.MustCompile("section.classref-descriptions-group#enumerations > h2")
-			selEnumerationItems = css.MustCompile("p.classref-enumeration")
-			selConstants        = css.MustCompile("section.classref-descriptions-group#constants > h2")
-			selConstantItems    = css.MustCompile("p.classref-constant")
-		)
-
-		// Process all classes
-		err = parallel.For(len(classes), func(i, _ int) error {
-			data := &classes[i]
-			cd := &classData[i]
-			{
-				slog.Info("Processing file.", "class", data.Sel.Text(), "path", data.FilePath)
-				cd.Name = data.Sel.Text()
-				cd.Path = data.HRef
-			}
-
-			path := filepath.Join(docsPath, data.FilePath)
-			f, err := os.Open(path)
-			if err != nil {
-				return fmt.Errorf("failed to open file: %w", err)
-			}
-			defer func() { _ = f.Close() }()
-
-			top, err := html.Parse(f)
-			if err != nil {
-				return fmt.Errorf("failed to parse HTML: %w", err)
-			}
-			doc := goquery.NewDocumentFromNode(top)
-
-			// head
-			headNode := selHead.MatchFirst(top)
-
-			// Class name
-			var className string
-			{
-				n := doc.FindMatcher(selTitle).First()
-				className = strings.TrimRight(n.Text(), "¶")
-				link, a, _ := newSectionHeaderLink(className, "Class")
-				headNode.AppendChild(link)
-				n.Get(0).Parent.InsertBefore(a, n.Get(0))
-
-				link, a, _ = newSectionItemLink(className, "Class")
-				headNode.AppendChild(link)
-				n.Get(0).Parent.InsertBefore(a, n.Get(0))
-			}
-
-			// Description
-			if n := doc.FindMatcher(selDescription).First(); n.Length() > 0 {
-				descriptionText := strings.TrimRight(n.Text(), "¶")
-				link, a, _ := newSectionHeaderLink(descriptionText, "Section")
-				headNode.AppendChild(link)
-				n.Get(0).Parent.InsertBefore(a, n.Get(0))
-
-				link, a, _ = newSectionItemLink(descriptionText, "Section")
-				headNode.AppendChild(link)
-				n.Get(0).Parent.InsertBefore(a, n.Get(0))
-			}
-
-			// tutorials
-			if n := doc.FindMatcher(selTutorials).First(); n.Length() > 0 {
-				// make sure we have some internal links
-				if items := n.Parent().FindMatcher(selTutorialItems); items.Length() > 0 {
-					tutorialName := strings.TrimRight(n.Text(), "¶")
-					link, a, _ := newSectionHeaderLink(tutorialName, "Guide")
-					headNode.AppendChild(link)
-					n.Get(0).Parent.InsertBefore(a, n.Get(0))
-
-					items.Each(func(i int, s *goquery.Selection) {
-						text := s.Text()
-						link, a, _ := newSectionItemLink(text, "Guide")
-						headNode.AppendChild(link)
-						s.Get(0).Parent.InsertBefore(a, s.Get(0))
-					})
-				}
-			}
-
-			refTable := func(h2, items css.Selector, etype, descriptionsID string) {
-				if n := doc.FindMatcher(h2).First(); n.Length() > 0 {
-					// make sure we have items in the table
-					if items := n.Parent().FindMatcher(items); items.Length() > 0 {
-						text := strings.TrimRight(n.Text(), "¶") // Properties table name
-						link, a, _ := newSectionHeaderLink(text, etype)
-						headNode.AppendChild(link)
-						n.Get(0).Parent.InsertBefore(a, n.Get(0))
-
-						items.Each(func(i int, s *goquery.Selection) {
-							// now find the id of the link, so that the TOC can link to it
-							if id, ok := s.Attr("href"); ok {
-								desc := doc.Find(fmt.Sprintf("body section#%s %s", descriptionsID, id)).First()
-								if desc.Length() > 0 {
-									s = s.Parent() // we want the complete text
-									itemName := s.Text()
-									link, a, target := newSectionItemLink(itemName, etype)
-									headNode.AppendChild(link)
-									desc.Get(0).Parent.InsertBefore(a, desc.Get(0))
-
-									cd.Rows = append(cd.Rows, SearchIndex{
-										Name: itemName,
-										Type: etype,
-										Path: makeSearchIndexPath(data.FilePath, itemName, itemName, className, target),
-									})
-								}
-							}
-						})
-					}
-				}
-			}
-
-			// These use the reftable
-			refTable(selProperties, selPropertyItems, "Property", "property-descriptions")
-			refTable(selConstructors, selConstructorItems, "Constructor", "constructor-descriptions")
-			refTable(selMethods, selMethodItems, "Method", "method-descriptions")
-			refTable(selOperators, selOperatorItems, "Operator", "operator-descriptions")
-
-			// signals
-			if n := doc.FindMatcher(selSignals).First(); n.Length() > 0 {
-				// make sure we have items
-				if items := n.Parent().FindMatcher(selSignalItems); items.Length() > 0 {
-					signalsText := strings.TrimRight(n.Text(), "¶")
-					link, a, _ := newSectionHeaderLink(signalsText, "Event")
-					headNode.AppendChild(link)
-					n.Get(0).Parent.InsertBefore(a, n.Get(0))
-
-					items.Each(func(i int, s *goquery.Selection) {
-						signalName := s.Find("strong").Text()
-						if signalName == "" {
-							return
-						}
-
-						link, a, target := newSectionItemLink(signalName, "Event")
-						headNode.AppendChild(link)
-						s.Get(0).Parent.InsertBefore(a, s.Get(0))
-						cd.Rows = append(cd.Rows, SearchIndex{
-							Name: signalName,
-							Type: "Event",
-							Path: makeSearchIndexPath(data.FilePath, signalName, signalName, className, target),
-						})
-					})
-				}
-			}
-
-			// enumerations
-			// Here we extract the enumeration name, and then find all the enum variants
-			// and format them as <enum>.<variant>
-			if enumNode := doc.FindMatcher(selEnumerations).First(); enumNode.Length() > 0 {
-				// make sure we have items
-				if items := enumNode.Parent().FindMatcher(selEnumerationItems); items.Length() > 0 {
-					enumsText := strings.TrimRight(enumNode.Text(), "¶")
-					link, a, _ := newSectionHeaderLink(enumsText, "Enum")
-					headNode.AppendChild(link)
-					enumNode.Get(0).Parent.InsertBefore(a, enumNode.Get(0))
-
-					items.Each(func(i int, s *goquery.Selection) {
-						id, ok := s.Attr("id")
-						if !ok {
-							return
-						}
-						enumName := s.Find("strong").Text()
-						if enumName == "" {
-							return
-						}
-
-						link, a, target := newSectionItemLink(enumName, "Enum")
-						headNode.AppendChild(link)
-						s.Get(0).Parent.InsertBefore(a, s.Get(0))
-						cd.Rows = append(cd.Rows, SearchIndex{
-							Name: enumName,
-							Type: "Enum",
-							Path: makeSearchIndexPath(data.FilePath, enumName, enumName, className, target),
-						})
-
-						// now find all enum variants
-						constants := s.Parent().Find(fmt.Sprintf("p.classref-enumeration-constant > a[href=\"#%s\"]", id))
-						constants.Each(func(i int, s *goquery.Selection) {
-							nameNode := s.Parent().Find("strong")
-							constantName := nameNode.Text()
-							if constantName == "" {
-								return
-							}
-							constantName = enumName + "." + constantName
-
-							link, a, target := newSectionItemLink(constantName, "Enum")
-							headNode.AppendChild(link)
-							nameNode.Get(0).InsertBefore(a, nameNode.Get(0))
-							cd.Rows = append(cd.Rows, SearchIndex{
-								Name: constantName,
-								Type: "Enum",
-								Path: makeSearchIndexPath(data.FilePath, constantName, constantName, className, target),
-							})
-						})
-					})
-				}
-			}
-
-			// constants
-			if n := doc.FindMatcher(selConstants).First(); n.Length() > 0 {
-				// make sure we have items
-				if items := n.Parent().FindMatcher(selConstantItems); items.Length() > 0 {
-					constantsText := strings.TrimRight(n.Text(), "¶")
-					link, a, _ := newSectionHeaderLink(constantsText, "Constant")
-					headNode.AppendChild(link)
-					n.Get(0).Parent.InsertBefore(a, n.Get(0))
-
-					items.Each(func(i int, s *goquery.Selection) {
-						constantName := s.Find("strong").Text()
-						if constantName == "" {
-							return
-						}
-
-						link, a, target := newSectionItemLink(constantName, "Constant")
-						headNode.AppendChild(link)
-						s.Get(0).Parent.InsertBefore(a, s.Get(0))
-						cd.Rows = append(cd.Rows, SearchIndex{
-							Name: constantName,
-							Type: "Constant",
-							Path: makeSearchIndexPath(data.FilePath, constantName, constantName, className, target),
-						})
-					})
-				}
-			}
-
-			db.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "name"}, {Name: "type"}, {Name: "path"}},
-				DoNothing: true,
-			}).Create(cd.Rows)
-
-			return writeHTML(filepath.Join(targetPath, data.FilePath), top, doc)
-		})
-
+	if noClasses == false {
+		err = processClassesIndex()
 		if err != nil {
 			return err
 		}
-
-		rows = lo.Map(classData, func(c class, i int) SearchIndex {
-			return SearchIndex{
-				Name: c.Name,
-				Type: "Class",
-				Path: c.Path,
-			}
-		})
-
-		db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "name"}, {Name: "type"}, {Name: "path"}},
-			DoNothing: true,
-		}).Create(rows)
 	}
 
-	// index guides
-	if processGuides {
-		type guide struct {
-			Name string
-			Path string
-			Rows []SearchIndex
-		}
-
-		guideData := make([]guide, len(guides))
-		// Process all classes
-		err = parallel.For(len(guides), func(i, _ int) error {
-			data := &guides[i]
-			cd := &guideData[i]
-			{
-				slog.Info("Processing file.", "guide", data.Sel.Text(), "path", data.FilePath)
-				cd.Name = data.Sel.Text()
-				cd.Path = data.HRef
-			}
-
-			path := filepath.Join(docsPath, data.FilePath)
-			f, err := os.Open(path)
-			if err != nil {
-				slog.Error("Failed to open file.", "error", err)
-				// skip it
-				return nil
-			}
-			defer func() { _ = f.Close() }()
-
-			top, err := html.Parse(f)
-			if err != nil {
-				return fmt.Errorf("failed to parse HTML: %w", err)
-			}
-			doc := goquery.NewDocumentFromNode(top)
-
-			// head
-			headNode := selHead.MatchFirst(top)
-
-			// Guide name
-			var className string
-			{
-				n := doc.FindMatcher(selTitle).First()
-				className = strings.TrimRight(n.Text(), "¶")
-				link, a, _ := newSectionHeaderLink(className, "Guide")
-				headNode.AppendChild(link)
-				n.Get(0).Parent.InsertBefore(a, n.Get(0))
-
-				link, a, _ = newSectionItemLink(className, "Guide")
-				headNode.AppendChild(link)
-				n.Get(0).Parent.InsertBefore(a, n.Get(0))
-			}
-
-			db.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "name"}, {Name: "type"}, {Name: "path"}},
-				DoNothing: true,
-			}).Create(cd.Rows)
-
-			return writeHTML(filepath.Join(targetPath, data.FilePath), top, doc)
-		})
-
-		if err != nil {
-			return err
-		}
-
-		rows = lo.Map(guideData, func(g guide, i int) SearchIndex {
-			return SearchIndex{
-				Name: g.Name,
-				Type: "Guide",
-				Path: g.Path,
-			}
-		})
-
-		db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "name"}, {Name: "type"}, {Name: "path"}},
-			DoNothing: true,
-		}).Create(rows)
+	err = processGuides(root)
+	if err != nil {
+		return err
 	}
 
-	err = writeHTML(filepath.Join(targetPath, "index.html"), top, doc)
+	doc := goquery.NewDocumentFromNode(root)
+
+	err = writeHTML(filepath.Join(targetPath, "index.html"), root, doc)
 	if err != nil {
 		return err
 	}
@@ -601,7 +193,20 @@ func process(cmd *cobra.Command, args []string) error {
 		return errors.Wrap(err, "failed to write Info.plist")
 	}
 
+	// copy icon.png to the docset
+
 	return nil
+}
+
+func writeRows(rows []SearchIndex) {
+	if db == nil {
+		return
+	}
+
+	db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "name"}, {Name: "type"}, {Name: "path"}},
+		DoNothing: true,
+	}).Create(rows)
 }
 
 func processClassesIndex() (err error) {
@@ -623,35 +228,35 @@ func processClassesIndex() (err error) {
 	doc := goquery.NewDocumentFromNode(root)
 
 	// globals
-	nodes := doc.Find("section#globals l1.toctree-l1 > a")
+	nodes := doc.Find("section#globals li.toctree-l1 > a")
 	err = processClasses(nodes, "Global")
 	if err != nil {
 		return err
 	}
 
 	// nodes
-	nodes = doc.Find("section#nodes l1.toctree-l1 > a")
+	nodes = doc.Find("section#nodes li.toctree-l1 > a")
 	err = processClasses(nodes, "Class")
 	if err != nil {
 		return err
 	}
 
 	// resources
-	nodes = doc.Find("section#resources l1.toctree-l1 > a")
+	nodes = doc.Find("section#resources li.toctree-l1 > a")
 	err = processClasses(nodes, "Resource")
 	if err != nil {
 		return err
 	}
 
 	// other-objects
-	nodes = doc.Find("section#other-objects l1.toctree-l1 > a")
+	nodes = doc.Find("section#other-objects li.toctree-l1 > a")
 	err = processClasses(nodes, "Object")
 	if err != nil {
 		return err
 	}
 
 	// types
-	nodes = doc.Find("section#variant-types l1.toctree-l1 > a")
+	nodes = doc.Find("section#variant-types li.toctree-l1 > a")
 	err = processClasses(nodes, "Type")
 	if err != nil {
 		return err
@@ -820,7 +425,7 @@ func processClasses(sel *goquery.Selection, etype string) error {
 			}
 		}
 
-		// These use the reftable
+		// These use the reftable class
 		refTable(selProperties, selPropertyItems, "Property", "property-descriptions")
 		refTable(selConstructors, selConstructorItems, "Constructor", "constructor-descriptions")
 		refTable(selMethods, selMethodItems, "Method", "method-descriptions")
@@ -933,10 +538,7 @@ func processClasses(sel *goquery.Selection, etype string) error {
 			}
 		}
 
-		db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "name"}, {Name: "type"}, {Name: "path"}},
-			DoNothing: true,
-		}).Create(cd.Rows)
+		writeRows(cd.Rows)
 
 		return writeHTML(filepath.Join(targetPath, data.FilePath), top, doc)
 	})
@@ -953,10 +555,131 @@ func processClasses(sel *goquery.Selection, etype string) error {
 		}
 	})
 
-	db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "name"}, {Name: "type"}, {Name: "path"}},
-		DoNothing: true,
-	}).Create(rows)
+	writeRows(rows)
+
+	return nil
+}
+
+func processGuides(root *html.Node) error {
+	sel := css.MustCompile("li.toctree-l1 > a, li.toctree-l2 > a, li.toctree-l3 > a")
+	doc := goquery.NewDocumentFromNode(root)
+
+	type document struct {
+		Title      string
+		GroupTitle string // set if this document is part of a group
+		FilePath   string
+		HRef       string
+	}
+
+	// docFileSet is the unique set of all documents to process
+	docFileSet := make(map[string]struct{})
+	// map the path to a document to its title
+	pathTitleMap := make(map[string]string)
+	input := make([]document, 0, doc.Length()) // reserve at least the maximum number of documents
+	doc.FindMatcher(sel).Each(func(i int, s *goquery.Selection) {
+		ref, ok := s.Attr("href")
+		if !ok {
+			return
+		}
+
+		fileUrl, err := url.Parse(ref)
+		if err != nil {
+			slog.Error("Failed to parse URL.", "url", ref, "error", err)
+			return
+		}
+
+		// skip classes
+		if strings.HasPrefix(fileUrl.Path, "classes/") {
+			return
+		}
+
+		fileUrl.Fragment = ""
+
+		if _, ok := docFileSet[fileUrl.Path]; ok {
+			// only process one copy of the file
+			return
+		}
+		docFileSet[fileUrl.Path] = struct{}{}
+
+		title := s.Text()
+
+		pathTitleMap[fileUrl.Path] = title
+
+		input = append(input, document{
+			Title:    title,
+			FilePath: fileUrl.Path,
+			HRef:     fileUrl.String(),
+		})
+	})
+
+	// find group titles, which means looking to see if there is an index.html,
+	// in the same path as the current document and using that title as the group
+	for i := range input {
+		d := &input[i]
+		dir := filepath.Dir(d.FilePath)
+		index := filepath.Join(dir, "index.html")
+		if _, ok := docFileSet[index]; ok {
+			d.GroupTitle = pathTitleMap[index]
+		}
+	}
+
+	var (
+		mainHeader    = css.MustCompile("section > h1")
+		sectionHeader = css.MustCompile("section > h2")
+	)
+
+	err := parallel.For(len(input), func(i, _ int) error {
+		data := &input[i]
+		slog.Info("Processing file.", "guide", data.Title, "group", data.GroupTitle, "path", data.FilePath)
+
+		path := filepath.Join(docsPath, data.FilePath)
+		f, err := os.Open(path)
+		if err != nil {
+			slog.Error("Failed to open file.", "error", err)
+			// skip it
+			return nil
+		}
+		defer func() { _ = f.Close() }()
+
+		top, err := html.Parse(f)
+		if err != nil {
+			return fmt.Errorf("failed to parse HTML: %w", err)
+		}
+		doc := goquery.NewDocumentFromNode(top)
+
+		// head
+		headNode := selHead.MatchFirst(top)
+
+		h1 := doc.FindMatcher(mainHeader).First()
+
+		link, a, _ := newSectionHeaderLink(data.Title, "Section")
+		headNode.AppendChild(link)
+		h1.Get(0).Parent.InsertBefore(a, h1.Get(0))
+
+		// add all the sections
+		doc.FindMatcher(sectionHeader).Each(func(i int, s *goquery.Selection) {
+			sectionName := strings.TrimRight(s.Text(), "¶")
+			link, a, _ := newSectionItemLink(sectionName, "Section")
+			headNode.AppendChild(link)
+			s.Get(0).Parent.InsertBefore(a, s.Get(0))
+		})
+
+		return writeHTML(filepath.Join(targetPath, data.FilePath), top, doc)
+	})
+
+	if err != nil {
+		return err
+	}
+
+	rows := lo.Map(input, func(d document, i int) SearchIndex {
+		return SearchIndex{
+			Name: d.Title,
+			Type: "Guide",
+			Path: makeSearchIndexPath(d.FilePath, d.Title, d.Title, d.GroupTitle, ""),
+		}
+	})
+
+	writeRows(rows)
 
 	return nil
 }
@@ -1045,6 +768,8 @@ var infoPlist = `
 	<key>DashDocSetFamily</key>
 	<string>dashtoc3</string>
 	<key>isDashDocset</key>
+	<true/>
+	<key>isJavaScriptEnabled</key>
 	<true/>
 	<key>dashIndexFilePath</key>
 	<string>index.html</string>

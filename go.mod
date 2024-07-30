@@ -1,10 +1,11 @@
-module github.com/stuartcarnie/godot-dash
+module github.com/stuartcarnie/godotdash
 
 go 1.22.5
 
 require (
 	github.com/PuerkitoBio/goquery v1.9.2
 	github.com/andybalholm/cascadia v1.3.2
+	github.com/bmatcuk/doublestar/v4 v4.6.1
 	github.com/pkg/errors v0.9.1
 	github.com/samber/lo v1.46.0
 	github.com/spf13/cobra v1.8.1
