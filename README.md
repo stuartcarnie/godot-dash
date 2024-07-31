@@ -44,6 +44,7 @@ documentation:
    godotdash --docs-path=<path to extracted zip> \
      --docset-path=<path to>/Godot.docset
     ```
+6. Add the docset to Dash
 
 [1]: https://github.com/godotengine/godot-docs?tab=readme-ov-file#download-for-offline-use
 [2]: https://kapeli.com/docsets#supportedentrytypes
