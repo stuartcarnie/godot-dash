@@ -21,7 +21,7 @@ documentation.
 For example, when you see a `Class` entry in Dash, it corresponds to all types derived from `Node` in the Godot 
 documentation:
 
-![img.png](_images/dash_classes.png)
+![Dash Classes Example](_images/dash_classes.png)
 
 ## Usage
 
