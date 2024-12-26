@@ -1,3 +1,4 @@
 Godot.docset
 venv
 *.zip
+godot-docs-html-*/

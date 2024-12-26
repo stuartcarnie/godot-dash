@@ -353,7 +353,7 @@ func processClasses(sel *goquery.Selection, etype string) error {
 		var className string
 		{
 			n := doc.FindMatcher(selTitle).First()
-			className = strings.TrimRight(n.Text(), "¶")
+			className = strings.TrimRight(n.Text(), "¶\uF0C1")
 			link, a, _ := newSectionHeaderLink(className, "Class")
 			headNode.AppendChild(link)
 			n.Get(0).Parent.InsertBefore(a, n.Get(0))
@@ -365,7 +365,7 @@ func processClasses(sel *goquery.Selection, etype string) error {
 
 		// Description
 		if n := doc.FindMatcher(selDescription).First(); n.Length() > 0 {
-			descriptionText := strings.TrimRight(n.Text(), "¶")
+			descriptionText := strings.TrimRight(n.Text(), "¶\uF0C1")
 			link, a, _ := newSectionHeaderLink(descriptionText, "Section")
 			headNode.AppendChild(link)
 			n.Get(0).Parent.InsertBefore(a, n.Get(0))
@@ -379,7 +379,7 @@ func processClasses(sel *goquery.Selection, etype string) error {
 		if n := doc.FindMatcher(selTutorials).First(); n.Length() > 0 {
 			// make sure we have some internal links
 			if items := n.Parent().FindMatcher(selTutorialItems); items.Length() > 0 {
-				tutorialName := strings.TrimRight(n.Text(), "¶")
+				tutorialName := strings.TrimRight(n.Text(), "¶\uF0C1")
 				link, a, _ := newSectionHeaderLink(tutorialName, "Guide")
 				headNode.AppendChild(link)
 				n.Get(0).Parent.InsertBefore(a, n.Get(0))
@@ -397,7 +397,7 @@ func processClasses(sel *goquery.Selection, etype string) error {
 			if n := doc.FindMatcher(h2).First(); n.Length() > 0 {
 				// make sure we have items in the table
 				if items := n.Parent().FindMatcher(items); items.Length() > 0 {
-					text := strings.TrimRight(n.Text(), "¶") // Properties table name
+					text := strings.TrimRight(n.Text(), "¶\uF0C1") // Properties table name
 					link, a, _ := newSectionHeaderLink(text, etype)
 					headNode.AppendChild(link)
 					n.Get(0).Parent.InsertBefore(a, n.Get(0))
@@ -435,8 +435,8 @@ func processClasses(sel *goquery.Selection, etype string) error {
 		if n := doc.FindMatcher(selSignals).First(); n.Length() > 0 {
 			// make sure we have items
 			if items := n.Parent().FindMatcher(selSignalItems); items.Length() > 0 {
-				signalsText := strings.TrimRight(n.Text(), "¶")
-				link, a, _ := newSectionHeaderLink(signalsText, "Event")
+				signalsText := strings.TrimRight(n.Text(), "¶\uF0C1")
+				link, a, _ := newSectionHeaderLink(signalsText, "Signal")
 				headNode.AppendChild(link)
 				n.Get(0).Parent.InsertBefore(a, n.Get(0))
 
@@ -446,12 +446,12 @@ func processClasses(sel *goquery.Selection, etype string) error {
 						return
 					}
 
-					link, a, target := newSectionItemLink(signalName, "Event")
+					link, a, target := newSectionItemLink(signalName, "Signal")
 					headNode.AppendChild(link)
 					s.Get(0).Parent.InsertBefore(a, s.Get(0))
 					cd.Rows = append(cd.Rows, SearchIndex{
 						Name: signalName,
-						Type: "Event",
+						Type: "Signal",
 						Path: makeSearchIndexPath(data.FilePath, signalName, signalName, className, target),
 					})
 				})
@@ -464,7 +464,7 @@ func processClasses(sel *goquery.Selection, etype string) error {
 		if enumNode := doc.FindMatcher(selEnumerations).First(); enumNode.Length() > 0 {
 			// make sure we have items
 			if items := enumNode.Parent().FindMatcher(selEnumerationItems); items.Length() > 0 {
-				enumsText := strings.TrimRight(enumNode.Text(), "¶")
+				enumsText := strings.TrimRight(enumNode.Text(), "¶\uF0C1")
 				link, a, _ := newSectionHeaderLink(enumsText, "Enum")
 				headNode.AppendChild(link)
 				enumNode.Get(0).Parent.InsertBefore(a, enumNode.Get(0))
@@ -515,7 +515,7 @@ func processClasses(sel *goquery.Selection, etype string) error {
 		if n := doc.FindMatcher(selConstants).First(); n.Length() > 0 {
 			// make sure we have items
 			if items := n.Parent().FindMatcher(selConstantItems); items.Length() > 0 {
-				constantsText := strings.TrimRight(n.Text(), "¶")
+				constantsText := strings.TrimRight(n.Text(), "¶\uF0C1")
 				link, a, _ := newSectionHeaderLink(constantsText, "Constant")
 				headNode.AppendChild(link)
 				n.Get(0).Parent.InsertBefore(a, n.Get(0))
@@ -658,7 +658,7 @@ func processGuides(root *html.Node) error {
 
 		// add all the sections
 		doc.FindMatcher(sectionHeader).Each(func(i int, s *goquery.Selection) {
-			sectionName := strings.TrimRight(s.Text(), "¶")
+			sectionName := strings.TrimRight(s.Text(), "¶\uF0C1")
 			link, a, _ := newSectionItemLink(sectionName, "Section")
 			headNode.AppendChild(link)
 			s.Get(0).Parent.InsertBefore(a, s.Get(0))
