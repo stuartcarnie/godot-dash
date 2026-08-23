@@ -91,36 +91,26 @@ func (si SearchIndex) TableName() string {
 }
 
 var (
-	wyNavSide        = css.MustCompile("nav.wy-nav-side")
-	rstVersions      = css.MustCompile("div.rst-versions")
 	wyNavContentWrap = css.MustCompile("section.wy-nav-content-wrap")
-	hereBeDragons    = css.MustCompile("div.admonition-grid")
+	// elements removed from every document
+	removeSelectors = []css.Selector{
+		css.MustCompile("nav.wy-nav-side"),                                     // side nav bar
+		css.MustCompile("nav.wy-nav-top"),                                      // mobile top banner with hamburger menu
+		css.MustCompile("div.rst-versions"),                                    // versions
+		css.MustCompile("div.admonition-grid"),                                 // "Attention: Here be dragons"
+		css.MustCompile("ul.wy-breadcrumbs > li:has(a.godot-edit-guidelines)"), // "Edit on GitHub" / "Learn how to contribute!"
+	}
 )
 
 func cleanupDocument(top *html.Node, doc *goquery.Document) {
-	// remove side nav bar
-	{
-		node := wyNavSide.MatchFirst(top)
-		node.Parent.RemoveChild(node)
-	}
-
-	// remove versions
-	{
-		node := rstVersions.MatchFirst(top)
-		node.Parent.RemoveChild(node)
+	for _, sel := range removeSelectors {
+		if node := sel.MatchFirst(top); node != nil {
+			node.Parent.RemoveChild(node)
+		}
 	}
 
 	// remove class from main section
-	{
-		res := doc.FindMatcher(wyNavContentWrap)
-		res.RemoveAttr("class")
-	}
-
-	// remove "Attention: Here be dragons"
-	{
-		node := hereBeDragons.MatchFirst(top)
-		node.Parent.RemoveChild(node)
-	}
+	doc.FindMatcher(wyNavContentWrap).RemoveAttr("class")
 }
 
 var (
@@ -178,6 +168,8 @@ func process(cmd *cobra.Command, args []string) error {
 
 	doc := goquery.NewDocumentFromNode(root)
 
+	buildIndexPage(doc)
+
 	err = writeHTML(filepath.Join(targetPath, "index.html"), root, doc)
 	if err != nil {
 		return err
@@ -196,6 +188,30 @@ func process(cmd *cobra.Command, args []string) error {
 	// copy icon.png to the docset
 
 	return nil
+}
+
+// buildIndexPage replaces the body of index.html with a table of contents
+// derived from the side navigation: one section per top-level caption, with
+// a bulleted link list of its immediate children.
+func buildIndexPage(doc *goquery.Document) {
+	body := doc.Find("div[itemprop=articleBody]")
+	if body.Length() == 0 {
+		return
+	}
+
+	var out strings.Builder
+	out.WriteString("<h1>Godot Engine</h1>\n")
+	doc.Find("nav.wy-nav-side p.caption").Each(func(_ int, caption *goquery.Selection) {
+		out.WriteString("<section><h2>" + html.EscapeString(caption.Text()) + "</h2>\n<ul>\n")
+		caption.Next().ChildrenFiltered("li.toctree-l1").Each(func(_ int, li *goquery.Selection) {
+			a := li.ChildrenFiltered("a").First()
+			href, _ := a.Attr("href")
+			out.WriteString(fmt.Sprintf("<li><a href=\"%s\">%s</a></li>\n", html.EscapeString(href), html.EscapeString(a.Text())))
+		})
+		out.WriteString("</ul></section>\n")
+	})
+
+	body.SetHtml(out.String())
 }
 
 func writeRows(rows []SearchIndex) {
@@ -701,21 +717,21 @@ func newSectionLink(name, etype string, isSectionHeader bool) (headLink *html.No
 	target = fmt.Sprintf("//dash_ref/%s/%s/%d", etype, name, isSection)
 
 	return &html.Node{
-			Type:     html.ElementNode,
-			DataAtom: atom.Link,
-			Data:     atom.Link.String(),
-			Attr: []html.Attribute{
-				{Key: "href", Val: target},
-			},
-		}, &html.Node{
-			Type:     html.ElementNode,
-			DataAtom: atom.A,
-			Data:     atom.A.String(),
-			Attr: []html.Attribute{
-				{Key: "class", Val: "dashAnchor"},
-				{Key: "name", Val: target},
-			},
-		}, target
+		Type:     html.ElementNode,
+		DataAtom: atom.Link,
+		Data:     atom.Link.String(),
+		Attr: []html.Attribute{
+			{Key: "href", Val: target},
+		},
+	}, &html.Node{
+		Type:     html.ElementNode,
+		DataAtom: atom.A,
+		Data:     atom.A.String(),
+		Attr: []html.Attribute{
+			{Key: "class", Val: "dashAnchor"},
+			{Key: "name", Val: target},
+		},
+	}, target
 }
 
 func makeSearchIndexPath(docPath, entryName, origName, desc, target string) string {

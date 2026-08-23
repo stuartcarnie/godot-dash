@@ -1,4 +1,4 @@
 Godot.docset
 venv
 *.zip
-godot-docs-html-*/
+godot-docs-html-*/godotdash
