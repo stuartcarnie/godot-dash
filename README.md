@@ -35,6 +35,10 @@ documentation:
 ### Generating the docset
 
 1. Download a ZIP archive of the [Godot 4.x documentation][1] for offline use (stable or latest)
+    ```nu
+    # Latest
+    http get https://nightly.link/godotengine/godot-docs/workflows/build_offline_docs/master/godot-docs-html-master. zip | save --progress -f godot-docs-html-master.zip
+    ```
 2. Extract the ZIP archive to a folder
 3. Create a new folder called `Godot.docset` for the docset
 4. Copy the contents of the extracted folder to `Godot.docset/Contents/Resources/Documents`
