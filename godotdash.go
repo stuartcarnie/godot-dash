@@ -199,14 +199,28 @@ func buildIndexPage(doc *goquery.Document) {
 		return
 	}
 
+	headNode := selHead.MatchFirst(doc.Get(0))
+
+	// dashAnchor registers a Dash TOC entry in <head> and returns the anchor
+	// markup to place before the entry's element.
+	dashAnchor := func(name string, isHeader bool) string {
+		link, a, _ := newSectionLink(name, "Section", isHeader)
+		headNode.AppendChild(link)
+		var buf bytes.Buffer
+		_ = html.Render(&buf, a)
+		return buf.String()
+	}
+
 	var out strings.Builder
 	out.WriteString("<h1>Godot Engine</h1>\n")
 	doc.Find("nav.wy-nav-side p.caption").Each(func(_ int, caption *goquery.Selection) {
-		out.WriteString("<section><h2>" + html.EscapeString(caption.Text()) + "</h2>\n<ul>\n")
+		title := caption.Text()
+		out.WriteString("<section>" + dashAnchor(title, true) + "<h2>" + html.EscapeString(title) + "</h2>\n<ul>\n")
 		caption.Next().ChildrenFiltered("li.toctree-l1").Each(func(_ int, li *goquery.Selection) {
 			a := li.ChildrenFiltered("a").First()
 			href, _ := a.Attr("href")
-			out.WriteString(fmt.Sprintf("<li><a href=\"%s\">%s</a></li>\n", html.EscapeString(href), html.EscapeString(a.Text())))
+			text := a.Text()
+			out.WriteString(fmt.Sprintf("<li>%s<a href=\"%s\">%s</a></li>\n", dashAnchor(text, false), html.EscapeString(href), html.EscapeString(text)))
 		})
 		out.WriteString("</ul></section>\n")
 	})
@@ -665,18 +679,31 @@ func processGuides(root *html.Node) error {
 		// head
 		headNode := selHead.MatchFirst(top)
 
-		h1 := doc.FindMatcher(mainHeader).First()
-
-		link, a, _ := newSectionHeaderLink(data.Title, "Section")
-		headNode.AppendChild(link)
-		h1.Get(0).Parent.InsertBefore(a, h1.Get(0))
-
-		// add all the sections
-		doc.FindMatcher(sectionHeader).Each(func(i int, s *goquery.Selection) {
-			sectionName := strings.TrimRight(s.Text(), "¶\uF0C1")
-			link, a, _ := newSectionItemLink(sectionName, "Section")
+		addAnchor := func(s *goquery.Selection, name string, isHeader bool) {
+			link, a, _ := newSectionLink(name, "Section", isHeader)
 			headNode.AppendChild(link)
 			s.Get(0).Parent.InsertBefore(a, s.Get(0))
+		}
+
+		// tocItems adds an item for each page listed in the heading's
+		// section toctree (index pages).
+		tocItems := func(heading *goquery.Selection) {
+			heading.Parent().ChildrenFiltered("div.toctree-wrapper").Find("li.toctree-l1 > a").
+				Each(func(_ int, a *goquery.Selection) { addAnchor(a, a.Text(), false) })
+		}
+
+		h1 := doc.FindMatcher(mainHeader).First()
+		addAnchor(h1, data.Title, true)
+		tocItems(h1)
+
+		// h2 sections: a header if it lists pages, otherwise an item
+		doc.FindMatcher(sectionHeader).Each(func(i int, s *goquery.Selection) {
+			sectionName := strings.TrimRight(s.Text(), "¶\uF0C1")
+			hasToc := s.Parent().ChildrenFiltered("div.toctree-wrapper").Length() > 0
+			addAnchor(s, sectionName, hasToc)
+			if hasToc {
+				tocItems(s)
+			}
 		})
 
 		return writeHTML(filepath.Join(targetPath, data.FilePath), top, doc)
