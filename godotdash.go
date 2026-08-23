@@ -243,42 +243,41 @@ func processClassesIndex() (err error) {
 	}
 	doc := goquery.NewDocumentFromNode(root)
 
-	// globals
-	nodes := doc.Find("section#globals li.toctree-l1 > a")
-	err = processClasses(nodes, "Global")
-	if err != nil {
-		return err
+	headNode := selHead.MatchFirst(root)
+
+	groups := []struct{ id, etype string }{
+		{"globals", "Global"},
+		{"nodes", "Class"},
+		{"resources", "Resource"},
+		{"other-objects", "Object"},
+		{"editor-only", "Class"},
+		{"variant-types", "Type"},
+	}
+	for _, g := range groups {
+		section := doc.Find("section#" + g.id)
+
+		// Dash TOC: section header
+		if h1 := section.ChildrenFiltered("h1").First(); h1.Length() > 0 {
+			link, a, _ := newSectionHeaderLink(strings.TrimRight(h1.Text(), "¶\uF0C1"), g.etype)
+			headNode.AppendChild(link)
+			h1.Get(0).Parent.InsertBefore(a, h1.Get(0))
+		}
+
+		nodes := section.Find("li.toctree-l1 > a")
+
+		// Dash TOC: one item per class
+		nodes.Each(func(_ int, s *goquery.Selection) {
+			link, a, _ := newSectionItemLink(s.Text(), g.etype)
+			headNode.AppendChild(link)
+			s.Get(0).Parent.InsertBefore(a, s.Get(0))
+		})
+
+		if err = processClasses(nodes, g.etype); err != nil {
+			return err
+		}
 	}
 
-	// nodes
-	nodes = doc.Find("section#nodes li.toctree-l1 > a")
-	err = processClasses(nodes, "Class")
-	if err != nil {
-		return err
-	}
-
-	// resources
-	nodes = doc.Find("section#resources li.toctree-l1 > a")
-	err = processClasses(nodes, "Resource")
-	if err != nil {
-		return err
-	}
-
-	// other-objects
-	nodes = doc.Find("section#other-objects li.toctree-l1 > a")
-	err = processClasses(nodes, "Object")
-	if err != nil {
-		return err
-	}
-
-	// types
-	nodes = doc.Find("section#variant-types li.toctree-l1 > a")
-	err = processClasses(nodes, "Type")
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return writeHTML(filepath.Join(targetPath, "classes/index.html"), root, doc)
 }
 
 func processClasses(sel *goquery.Selection, etype string) error {
