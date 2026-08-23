@@ -2,3 +2,4 @@ Godot.docset
 venv
 *.zip
 godot-docs-html-*/godotdash
+*.tgz

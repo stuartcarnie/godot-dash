@@ -2,6 +2,18 @@
 
 This is tool to generate a Dash docset for Godot 4.x.
 
+## Docset Releases
+
+Pre-built docsets are published on the [releases page][3].
+
+1. Download `Godot.tgz` from the release you want
+2. Extract it, which produces `Godot.docset`
+3. In Dash, open **Settings → Docsets**, click **+** and choose **Add Local Docset**, then select `Godot.docset`
+
+Releases are tagged with a version such as `v4.8.0-nightly.20260823`. Nightly builds are generated from the
+`master` branch of the Godot documentation and are marked as pre-releases. They may describe features that are not
+available in stable Godot releases.
+
 ## Dash [entry type][2] mappings
 
 The following table shows the mapping of the Dash entry types to the corresponding types used in the Godot 
@@ -52,6 +64,7 @@ documentation:
 
 [1]: https://github.com/godotengine/godot-docs?tab=readme-ov-file#download-for-offline-use
 [2]: https://kapeli.com/docsets#supportedentrytypes
+[3]: https://github.com/stuartcarnie/godot-dash/releases
 
 ## Credits
 
